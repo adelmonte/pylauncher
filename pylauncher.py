@@ -97,6 +97,8 @@ class AppLauncher(Gtk.Window):
         self.show_all()
         self.present()
         self._visible = True
+        # Defer first-row selection so it runs after GTK processes present() focus events
+        GLib.idle_add(self._select_first_row)
         self._signal_waybar()
         GLib.timeout_add(150, self._unblock_row_activation)
 
@@ -323,9 +325,17 @@ class AppLauncher(Gtk.Window):
     def _post_animation_setup(self):
         """Called after animation completes"""
         self.is_animating = False
+        GLib.idle_add(self._select_first_row)
+        return False
+
+    def _select_first_row(self):
+        """Select and keyboard-focus the first row in the current listbox."""
         first_row = self.listbox.get_row_at_index(0)
         if first_row:
             self.listbox.select_row(first_row)
+            # Don't steal focus from the search entry mid-typing
+            if not self.search_entry.has_focus():
+                first_row.grab_focus()
         return False
     
     def show_favorites_view(self, animate=False, direction='back'):
@@ -348,9 +358,7 @@ class AppLauncher(Gtk.Window):
         else:
             populate(self.listbox)
             self.listbox.show_all()
-            first_row = self.listbox.get_row_at_index(0)
-            if first_row:
-                self.listbox.select_row(first_row)
+            GLib.idle_add(self._select_first_row)
 
     
     def show_categories_view(self, direction='forward'):
@@ -421,9 +429,7 @@ class AppLauncher(Gtk.Window):
                 self.listbox.remove(child)
             populate(self.listbox)
             self.listbox.show_all()
-            first_row = self.listbox.get_row_at_index(0)
-            if first_row:
-                self.listbox.select_row(first_row)
+            GLib.idle_add(self._select_first_row)
 
     
     def show_search_results(self, query):
@@ -440,11 +446,9 @@ class AppLauncher(Gtk.Window):
             self.listbox.add(row)
         
         self.listbox.show_all()
-        first_row = self.listbox.get_row_at_index(0)
-        if first_row:
-            self.listbox.select_row(first_row)
+        GLib.idle_add(self._select_first_row)
 
-    
+
     def go_back(self):
         """Navigate back in the view stack"""
         if len(self.view_stack) > 1:
@@ -538,10 +542,10 @@ class AppLauncher(Gtk.Window):
         
         if draggable:
             event_box.add_events(
-                Gdk.EventMask.BUTTON_PRESS_MASK | 
-                Gdk.EventMask.BUTTON_RELEASE_MASK | 
-                Gdk.EventMask.POINTER_MOTION_MASK | 
-                Gdk.EventMask.ENTER_NOTIFY_MASK | 
+                Gdk.EventMask.BUTTON_PRESS_MASK |
+                Gdk.EventMask.BUTTON_RELEASE_MASK |
+                Gdk.EventMask.POINTER_MOTION_MASK |
+                Gdk.EventMask.ENTER_NOTIFY_MASK |
                 Gdk.EventMask.LEAVE_NOTIFY_MASK
             )
             event_box.connect("button-press-event", self.on_button_press, row)
@@ -550,7 +554,12 @@ class AppLauncher(Gtk.Window):
             event_box.connect("enter-notify-event", self.on_row_enter, row)
             event_box.connect("leave-notify-event", self.on_row_leave, row)
         else:
-            event_box.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+            event_box.add_events(
+                Gdk.EventMask.BUTTON_PRESS_MASK |
+                Gdk.EventMask.ENTER_NOTIFY_MASK |
+                Gdk.EventMask.LEAVE_NOTIFY_MASK
+            )
+            event_box.connect("button-press-event", self.on_button_press, row)
             event_box.connect("enter-notify-event", self.on_row_enter, row)
             event_box.connect("leave-notify-event", self.on_row_leave, row)
         
@@ -660,6 +669,9 @@ class AppLauncher(Gtk.Window):
 
     
     def on_button_press(self, widget, event, row):
+        if event.button == 3:
+            self.show_context_menu(row.app_data, event)
+            return True
         if event.button == 1:
             self.dragging = True
             self.drag_row = row
@@ -697,6 +709,37 @@ class AppLauncher(Gtk.Window):
         return False
 
     
+    def show_context_menu(self, app, event):
+        menu = Gtk.Menu()
+
+        launch_item = Gtk.MenuItem(label=f"Launch {app['name']}")
+        launch_item.connect("activate", lambda item: self.launch_app(app))
+        menu.append(launch_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        open_location_item = Gtk.MenuItem(label="Open .desktop file location")
+        open_location_item.connect(
+            "activate",
+            lambda item, p=app['desktop_path']: self._open_file_location(p)
+        )
+        menu.append(open_location_item)
+
+        menu.show_all()
+        menu.popup_at_pointer(event)
+
+    def _open_file_location(self, desktop_path):
+        directory = str(Path(desktop_path).parent)
+        try:
+            subprocess.Popen(
+                ['xdg-open', directory],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception:
+            pass
+
     def on_favorite_clicked(self, button, app):
         desktop_id = app['desktop_id']
         
@@ -786,11 +829,9 @@ class AppLauncher(Gtk.Window):
             self.rebuild_nav_button("back", "Back", "go-previous", self.go_back)
 
         self.listbox.show_all()
-        first_row = self.listbox.get_row_at_index(0)
-        if first_row:
-            self.listbox.select_row(first_row)
+        GLib.idle_add(self._select_first_row)
 
-    
+
     def on_search_activate(self, entry):
         query = entry.get_text().strip()
 
@@ -1049,6 +1090,7 @@ class AppLauncher(Gtk.Window):
 
         if not self.search_entry.has_focus():
             self.search_entry.grab_focus()
+            self.search_entry.set_position(-1)
 
         return False
 
